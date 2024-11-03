@@ -1,101 +1,118 @@
-// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.17;
 
 contract TicketSale {
-    // <contract_variables>
-    address public manager;
-    uint public ticketPrice;
-    uint public totalTickets;
-    uint public ticketsSold;
-    mapping(uint => address) public ticketOwners;
-    mapping(address => uint) public ownedTicket;
-    mapping(uint => uint) public resaleTickets;
-    mapping(address => uint) public swapOffers;
-    uint public constant serviceFeePercent = 10;
-    // </contract_variables>
+    struct Ticket {
+        address owner;
+        uint256 price;
+        bool forSale;
+    }
 
-    // Constructor to initialize ticket sale parameters
-    constructor(uint numTickets, uint price) public {
+    address public manager;
+    uint256 public ticketPrice;
+    uint256 public totalTickets;
+    mapping(uint256 => Ticket) public tickets;
+    mapping(address => uint256) public ticketOwners;
+    mapping(address => mapping(address => uint256)) public swapOffers;
+
+    constructor(uint256 numTickets, uint256 price) {
         manager = msg.sender;
         totalTickets = numTickets;
         ticketPrice = price;
     }
 
-    // Buy ticket function
-    function buyTicket(uint ticketId) public payable {
+    function buyTicket(uint256 ticketId) public payable {
         require(ticketId > 0 && ticketId <= totalTickets, "Invalid ticket ID");
-        require(ticketOwners[ticketId] == address(0), "Ticket already sold");
-        require(ownedTicket[msg.sender] == 0, "One ticket per person");
+        require(tickets[ticketId].owner == address(0), "Ticket already sold");
+        require(ticketOwners[msg.sender] == 0, "You already own a ticket");
         require(msg.value == ticketPrice, "Incorrect payment amount");
-        
-        ticketOwners[ticketId] = msg.sender;
-        ownedTicket[msg.sender] = ticketId;
-        ticketsSold++;
+
+        tickets[ticketId].owner = msg.sender;
+        ticketOwners[msg.sender] = ticketId;
     }
 
-    // Get ticket ID of the buyer
-    function getTicketOf(address person) public view returns (uint) {
-        return ownedTicket[person];
+    function getTicketOf(address person) public view returns (uint256) {
+        return ticketOwners[person];
     }
 
-    // Offer a ticket swap
-    function offerSwap(uint ticketId) public {
-        require(ownedTicket[msg.sender] == ticketId, "You don't own this ticket");
-        swapOffers[msg.sender] = ticketId;
+    function offerSwap(uint256 ticketId) public {
+        uint256 myTicketId = ticketOwners[msg.sender];
+        require(myTicketId != 0, "You don't own a ticket");
+        require(tickets[ticketId].owner != address(0), "Target ticket not sold");
+        require(tickets[ticketId].owner != msg.sender, "Cannot swap with yourself");
+
+        address targetOwner = tickets[ticketId].owner;
+        swapOffers[msg.sender][targetOwner] = myTicketId;
     }
 
-    // Accept a swap offer
-    function acceptSwap(uint ticketId) public {
-        address swapPartner = address(0);
-        for (address addr = address(0); addr < address(type(uint160).max);) {
-            if (swapOffers[addr] == ownedTicket[msg.sender]) {
-                swapPartner = addr;
+    function acceptSwap(uint256 myTicketId) public {
+        require(ticketOwners[msg.sender] == myTicketId, "You don't own this ticket");
+
+        address swapPartner;
+        uint256 offeredTicketId;
+
+        for (uint256 i = 1; i <= totalTickets; i++) {
+            if (swapOffers[tickets[i].owner][msg.sender] != 0) {
+                swapPartner = tickets[i].owner;
+                offeredTicketId = swapOffers[swapPartner][msg.sender];
                 break;
             }
         }
-        require(swapPartner != address(0), "No swap offer found");
 
-        uint partnerTicketId = ownedTicket[swapPartner];
-        ownedTicket[swapPartner] = ownedTicket[msg.sender];
-        ownedTicket[msg.sender] = partnerTicketId;
+        require(offeredTicketId != 0, "No swap offer for you");
 
-        swapOffers[swapPartner] = 0;
+        tickets[myTicketId].owner = swapPartner;
+        tickets[offeredTicketId].owner = msg.sender;
+        ticketOwners[msg.sender] = offeredTicketId;
+        ticketOwners[swapPartner] = myTicketId;
+
+        delete swapOffers[swapPartner][msg.sender];
     }
 
-    // Resale ticket
-    function resaleTicket(uint price) public {
-        require(ownedTicket[msg.sender] > 0, "You don't own a ticket");
-        resaleTickets[ownedTicket[msg.sender]] = price;
+    function resaleTicket(uint256 price) public {
+        uint256 ticketId = ticketOwners[msg.sender];
+        require(ticketId != 0, "You don't own a ticket");
+
+        tickets[ticketId].price = price;
+        tickets[ticketId].forSale = true;
     }
 
-    // Accept resale ticket
-    function acceptResale(uint ticketId) public payable {
-        require(resaleTickets[ticketId] > 0, "Ticket not for resale");
-        require(ownedTicket[msg.sender] == 0, "One ticket per person");
-        uint resalePrice = resaleTickets[ticketId];
-        uint managerFee = (resalePrice * serviceFeePercent) / 100;
-        uint sellerAmount = resalePrice - managerFee;
+    function acceptResale(uint256 ticketId) public payable {
+        Ticket storage ticket = tickets[ticketId];
+        require(ticket.forSale, "Ticket not for sale");
+        require(ticketOwners[msg.sender] == 0, "You already own a ticket");
+        require(msg.value == ticket.price, "Incorrect payment amount");
 
-        require(msg.value == resalePrice, "Incorrect payment amount");
+        address seller = ticket.owner;
+        uint256 serviceFee = (ticket.price * 10) / 100;
+        uint256 sellerAmount = ticket.price - serviceFee;
 
-        payable(ticketOwners[ticketId]).transfer(sellerAmount);
-        payable(manager).transfer(managerFee);
+        payable(seller).transfer(sellerAmount);
+        payable(manager).transfer(serviceFee);
 
-        ticketOwners[ticketId] = msg.sender;
-        ownedTicket[msg.sender] = ticketId;
-        resaleTickets[ticketId] = 0;
+        ticket.owner = msg.sender;
+        ticket.forSale = false;
+        ticketOwners[msg.sender] = ticketId;
+        delete ticketOwners[seller];
     }
 
-    // Check resale tickets
-    function checkResale() public view returns (uint[] memory) {
-        uint[] memory ticketsForResale = new uint[](totalTickets);
-        uint count = 0;
-        for (uint i = 1; i <= totalTickets; i++) {
-            if (resaleTickets[i] > 0) {
-                ticketsForResale[count] = i;
+    function checkResale() public view returns (uint256[] memory) {
+        uint256 count = 0;
+        for (uint256 i = 1; i <= totalTickets; i++) {
+            if (tickets[i].forSale) {
                 count++;
             }
         }
-        return ticketsForResale;
+
+        uint256[] memory resaleTickets = new uint256[](count * 2);
+        uint256 index = 0;
+        for (uint256 i = 1; i <= totalTickets; i++) {
+            if (tickets[i].forSale) {
+                resaleTickets[index] = i;
+                resaleTickets[index + 1] = tickets[i].price;
+                index += 2;
+            }
+        }
+
+        return resaleTickets;
     }
 }
